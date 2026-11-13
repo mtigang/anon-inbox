@@ -152,16 +152,29 @@ export async function getMessage(id) {
 export async function listUnread(limit) {
   const lim = Math.min(Number(limit) || 20, 40);
   try {
-    return (
+    const rows =
       (await db
         .select()
         .from(messages)
         .where(eq(messages.status, 'unread'))
         .orderBy(desc(messages.id))
         .limit(lim)
-        .all()) || []
-    );
-  } catch (_e) {
+        .all()) || [];
+    if (rows.length) return rows;
+  } catch (e) {
+    console.error('listUnread where', e);
+  }
+  // fallback: آخرین‌ها و فیلتر در حافظه
+  try {
+    const all =
+      (await db.select().from(messages).orderBy(desc(messages.id)).limit(80).all()) || [];
+    return all
+      .filter(function (r) {
+        return String(r.status || '') === 'unread';
+      })
+      .slice(0, lim);
+  } catch (e2) {
+    console.error('listUnread fallback', e2);
     return [];
   }
 }
@@ -170,11 +183,15 @@ export async function listPrevious(limit) {
   const lim = Math.min(Number(limit) || 20, 40);
   try {
     const all =
-      (await db.select().from(messages).orderBy(desc(messages.id)).limit(lim * 2).all()) || [];
-    return all.filter(function (r) {
-      return String(r.status) !== 'unread';
-    }).slice(0, lim);
-  } catch (_e) {
+      (await db.select().from(messages).orderBy(desc(messages.id)).limit(Math.max(lim * 3, 40)).all()) ||
+      [];
+    return all
+      .filter(function (r) {
+        return String(r.status || '') !== 'unread';
+      })
+      .slice(0, lim);
+  } catch (e) {
+    console.error('listPrevious', e);
     return [];
   }
 }
@@ -217,19 +234,30 @@ export async function notifyOwners(text, extra) {
   }
 }
 
+export function uidOf(row) {
+  if (!row) return 0;
+  return Number(row.userId != null ? row.userId : row.user_id) || 0;
+}
+
+export function nameOf(u) {
+  if (!u) return '—';
+  return [u.firstName || u.first_name, u.lastName || u.last_name].filter(Boolean).join(' ') || '—';
+}
+
 export function formatUserCard(u) {
   if (!u) return 'کاربر یافت نشد.';
-  const name = [u.firstName || u.first_name, u.lastName || u.last_name].filter(Boolean).join(' ') || '—';
+  const name = nameOf(u);
   const un = u.username ? '@' + String(u.username).replace(/^@/, '') : 'ندارد';
+  const id = uidOf(u);
   return (
-    '👤 پروفایل کاربر\n\n' +
-    '• نام: ' +
+    'پروفایل کاربر\n\n' +
+    'نام: ' +
     name +
-    '\n• یوزرنیم: ' +
+    '\nیوزرنیم: ' +
     un +
-    '\n• آیدی عددی: `' +
-    (u.userId || u.user_id) +
-    '`\n• نقش: ' +
+    '\nآیدی عددی: ' +
+    id +
+    '\nنقش: ' +
     (u.role || 'user')
   );
 }

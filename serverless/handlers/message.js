@@ -10,13 +10,20 @@ import {
   listPrevious,
   listRecentUsers,
   findUserByUsername,
-  notifyOwners,
   formatUserCard,
   getMessage,
   setReplied,
-  markRead,
+  uidOf,
+  nameOf,
 } from 'lib/dbutil';
-import { userKeyboard, ownerKeyboard, messageActionsInline, sanitizeMarkup } from 'lib/keyboards';
+import {
+  userKeyboard,
+  userStartInline,
+  ownerKeyboard,
+  messageActionsInline,
+  backKeyboard,
+  sanitizeMarkup,
+} from 'lib/keyboards';
 import { setState, getState, clearState } from 'lib/state';
 
 function kbFor(uid, botOn) {
@@ -25,27 +32,32 @@ function kbFor(uid, botOn) {
 }
 
 async function deliverMessageCard(chatId, row) {
-  const u = await getUser(row.userId);
-  const name = u
-    ? [u.firstName || u.first_name, u.lastName || u.last_name].filter(Boolean).join(' ') || '—'
-    : '—';
+  const peerId = uidOf(row);
+  let u = null;
+  try {
+    u = peerId ? await getUser(peerId) : null;
+  } catch (_e) {}
+  const name = nameOf(u);
   const un = u && u.username ? '@' + String(u.username).replace(/^@/, '') : '';
+  const st = String(row.status || '');
+  const stLabel =
+    st === 'unread' ? 'خوانده‌نشده' : st === 'replied' ? 'پاسخ‌داده‌شده' : 'خوانده‌شده';
   const head =
-    '📩 پیام #' +
+    'پیام #' +
     row.id +
-    ' · ' +
-    (String(row.status) === 'unread' ? '🟡 خوانده‌نشده' : String(row.status) === 'replied' ? '💬 پاسخ‌داده‌شده' : '✅ خوانده‌شده') +
+    ' | ' +
+    stLabel +
     '\nاز: ' +
     name +
     (un ? ' ' + un : '') +
-    ' (`' +
-    row.userId +
-    '`)\n\n';
+    '\nآیدی: ' +
+    peerId +
+    '\n\n';
+  const body = head + String(row.content || '');
   await api.sendMessage({
     chat_id: chatId,
-    text: head + String(row.content || ''),
-    parse_mode: 'Markdown',
-    reply_markup: sanitizeMarkup(messageActionsInline(row.id, row.userId)),
+    text: body.slice(0, 4000),
+    reply_markup: sanitizeMarkup(messageActionsInline(row.id, peerId)),
   });
 }
 
@@ -67,49 +79,71 @@ export default async function (message) {
       state = await getState(userId);
     } catch (_e) {}
 
-    if (text === '/start' || text.startsWith('/start ')) {
+    // بازگشت
+    if (text === 'بازگشت' || text === '/start' || text.startsWith('/start ')) {
       await clearState(userId);
-      await api.sendMessage({
-        chat_id: chatId,
-        text: owner ? WELCOME_OWNER : WELCOME_USER,
-        reply_markup: kbFor(userId, botOn),
-      });
+      if (owner) {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: text.startsWith('/start') ? WELCOME_OWNER : 'منوی مالک',
+          reply_markup: kbFor(userId, botOn),
+        });
+      } else {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: text.startsWith('/start') ? WELCOME_USER : 'منوی اصلی',
+          reply_markup: userStartInline(),
+        });
+        // کیبورد پایین هم برای سازگاری
+        try {
+          await api.sendMessage({
+            chat_id: chatId,
+            text: 'از دکمه زیر یا دکمه سبز استفاده کنید.',
+            reply_markup: userKeyboard(),
+          });
+        } catch (_e) {}
+      }
       return;
     }
 
     // —— OWNER ——
     if (owner) {
-      if (text === '🔴 خاموش کردن ربات') {
+      if (text === 'خاموش کردن ربات') {
         await setBotOn(false);
         await api.sendMessage({
           chat_id: chatId,
-          text: '🔴 ربات خاموش شد. کاربران عادی نمی‌توانند پیام بفرستند.',
+          text: 'ربات خاموش شد. کاربران عادی نمی‌توانند پیام بفرستند.',
           reply_markup: kbFor(userId, false),
         });
         return;
       }
-      if (text === '🟢 روشن کردن ربات') {
+      if (text === 'روشن کردن ربات') {
         await setBotOn(true);
         await api.sendMessage({
           chat_id: chatId,
-          text: '🟢 ربات روشن شد.',
+          text: 'ربات روشن شد.',
           reply_markup: kbFor(userId, true),
         });
         return;
       }
-      if (text === '📬 پیام‌های خوانده‌نشده') {
-        const rows = await listUnread(20);
-        if (!rows.length) {
+      if (text === 'پیام‌های خوانده‌نشده') {
+        let rows = [];
+        try {
+          rows = await listUnread(25);
+        } catch (e) {
+          console.error('listUnread', e);
+        }
+        if (!rows || !rows.length) {
           await api.sendMessage({
             chat_id: chatId,
-            text: '📭 پیام خوانده‌نشده‌ای نیست.',
+            text: 'پیام خوانده‌نشده‌ای نیست.',
             reply_markup: kbFor(userId, botOn),
           });
           return;
         }
         await api.sendMessage({
           chat_id: chatId,
-          text: '📬 ' + rows.length + ' پیام خوانده‌نشده:',
+          text: rows.length + ' پیام خوانده‌نشده:',
           reply_markup: kbFor(userId, botOn),
         });
         for (const row of rows) {
@@ -117,23 +151,41 @@ export default async function (message) {
             await deliverMessageCard(chatId, row);
           } catch (e) {
             console.error('deliver unread', e);
+            try {
+              await api.sendMessage({
+                chat_id: chatId,
+                text:
+                  'پیام #' +
+                  (row && row.id) +
+                  ' (نمایش کامل خطا داد)\nآیدی فرستنده: ' +
+                  uidOf(row) +
+                  '\n' +
+                  String((row && row.content) || '').slice(0, 500),
+                reply_markup: sanitizeMarkup(messageActionsInline(row.id, uidOf(row))),
+              });
+            } catch (_e2) {}
           }
         }
         return;
       }
-      if (text === '📂 پیام‌های قبلی') {
-        const rows = await listPrevious(20);
-        if (!rows.length) {
+      if (text === 'پیام‌های قبلی') {
+        let rows = [];
+        try {
+          rows = await listPrevious(25);
+        } catch (e) {
+          console.error('listPrevious', e);
+        }
+        if (!rows || !rows.length) {
           await api.sendMessage({
             chat_id: chatId,
-            text: '📂 پیام قبلی ثبت نشده.',
+            text: 'پیام قبلی ثبت نشده.',
             reply_markup: kbFor(userId, botOn),
           });
           return;
         }
         await api.sendMessage({
           chat_id: chatId,
-          text: '📂 ' + rows.length + ' پیام قبلی:',
+          text: rows.length + ' پیام قبلی:',
           reply_markup: kbFor(userId, botOn),
         });
         for (const row of rows) {
@@ -145,9 +197,14 @@ export default async function (message) {
         }
         return;
       }
-      if (text === '👥 مشاهده کاربران') {
-        const rows = await listRecentUsers(10);
-        if (!rows.length) {
+      if (text === 'مشاهده کاربران') {
+        let rows = [];
+        try {
+          rows = await listRecentUsers(10);
+        } catch (e) {
+          console.error('listRecentUsers', e);
+        }
+        if (!rows || !rows.length) {
           await api.sendMessage({
             chat_id: chatId,
             text: 'هنوز کاربری استارت نکرده.',
@@ -155,27 +212,27 @@ export default async function (message) {
           });
           return;
         }
-        let body = '👥 ۱۰ کاربر اخیر (استارت):\n\n';
+        let body = '۱۰ کاربر اخیر:\n\n';
         for (const u of rows) {
-          const name = [u.firstName || u.first_name, u.lastName || u.last_name].filter(Boolean).join(' ') || '—';
+          const name = nameOf(u);
           const un = u.username ? '@' + String(u.username).replace(/^@/, '') : '—';
-          body += '• ' + name + ' | ' + un + ' | `' + (u.userId || u.user_id) + '`\n';
+          const id = uidOf(u);
+          body += name + ' | ' + un + ' | ' + id + '\n';
         }
-        body += '\n🔍 برای جستجو: «جستجوی کاربر» را بزنید.';
+        body += '\nبرای جستجو: جستجوی کاربر';
         await api.sendMessage({
           chat_id: chatId,
           text: body,
-          parse_mode: 'Markdown',
           reply_markup: kbFor(userId, botOn),
         });
         return;
       }
-      if (text === '🔍 جستجوی کاربر') {
+      if (text === 'جستجوی کاربر') {
         await setState(userId, 'search_user');
         await api.sendMessage({
           chat_id: chatId,
-          text: 'آیدی عددی یا @یوزرنیم کاربر را بفرستید.',
-          reply_markup: sanitizeMarkup({ keyboard: [[{ text: '/start' }]], resize_keyboard: true }),
+          text: 'آیدی عددی یا یوزرنیم کاربر را بفرستید.',
+          reply_markup: backKeyboard(),
         });
         return;
       }
@@ -190,7 +247,6 @@ export default async function (message) {
         await api.sendMessage({
           chat_id: chatId,
           text: formatUserCard(u),
-          parse_mode: 'Markdown',
           reply_markup: kbFor(userId, botOn),
         });
         return;
@@ -210,12 +266,12 @@ export default async function (message) {
         try {
           await api.sendMessage({
             chat_id: peerId,
-            text: '💬 پاسخ مالک:\n\n' + text,
+            text: 'پاسخ مالک:\n\n' + text,
           });
           await setReplied(mid, text);
           await api.sendMessage({
             chat_id: chatId,
-            text: '✅ پاسخ به کاربر ارسال شد.',
+            text: 'پاسخ به کاربر ارسال شد.',
             reply_markup: kbFor(userId, botOn),
           });
         } catch (e) {
@@ -241,57 +297,55 @@ export default async function (message) {
     if (!botOn) {
       await api.sendMessage({
         chat_id: chatId,
-        text: '🔴 ربات فعلاً خاموش است. بعداً دوباره تلاش کنید.',
-        reply_markup: userKeyboard(),
+        text: 'ربات فعلاً خاموش است. بعداً دوباره تلاش کنید.',
+        reply_markup: userStartInline(),
       });
       return;
     }
 
-    if (text === '🟢 ارسال پیام') {
+    if (text === 'ارسال پیام') {
       await setState(userId, 'compose');
       await api.sendMessage({
         chat_id: chatId,
         text: 'پیام خود را بنویسید و بفرستید.\n(فقط متن)',
-        reply_markup: sanitizeMarkup({ keyboard: [[{ text: '/start' }]], resize_keyboard: true }),
+        reply_markup: backKeyboard(),
       });
       return;
     }
 
     if (state && state.kind === 'compose' && text) {
-      if (text === '/start') {
-        await clearState(userId);
-        await api.sendMessage({
-          chat_id: chatId,
-          text: WELCOME_USER,
-          reply_markup: userKeyboard(),
-        });
-        return;
-      }
       const mid = await saveMessage(userId, text);
       await clearState(userId);
       await api.sendMessage({
         chat_id: chatId,
-        text: '✅ پیام شما ثبت و برای مالک ارسال شد.',
+        text: 'پیام شما ثبت و برای مالک ارسال شد.',
         reply_markup: userKeyboard(),
       });
-      // فوری به مالک‌ها
+      try {
+        await api.sendMessage({
+          chat_id: chatId,
+          text: 'می‌توانید دوباره ارسال کنید.',
+          reply_markup: userStartInline(),
+        });
+      } catch (_e) {}
+
       const name = [from.first_name, from.last_name].filter(Boolean).join(' ') || '—';
       const un = from.username ? '@' + from.username : '';
+      const notifyText =
+        'پیام جدید #' +
+        (mid || '?') +
+        '\nاز: ' +
+        name +
+        (un ? ' ' + un : '') +
+        '\nآیدی: ' +
+        userId +
+        '\n\n' +
+        text;
       for (const oid of OWNER_IDS) {
         try {
           await api.sendMessage({
             chat_id: Number(oid),
-            text:
-              '📩 پیام جدید #' +
-              (mid || '?') +
-              '\nاز: ' +
-              name +
-              (un ? ' ' + un : '') +
-              ' (`' +
-              userId +
-              '`)\n\n' +
-              text,
-            parse_mode: 'Markdown',
+            text: notifyText.slice(0, 4000),
             reply_markup: sanitizeMarkup(messageActionsInline(mid, userId)),
           });
         } catch (e) {
@@ -303,15 +357,15 @@ export default async function (message) {
 
     await api.sendMessage({
       chat_id: chatId,
-      text: 'از دکمه «🟢 ارسال پیام» استفاده کنید یا /start',
-      reply_markup: userKeyboard(),
+      text: 'از دکمه ارسال پیام استفاده کنید.',
+      reply_markup: userStartInline(),
     });
   } catch (e) {
     console.error('message handler', e);
     try {
       await api.sendMessage({
         chat_id: message.chat.id,
-        text: '⚠️ خطا. /start\n' + String((e && e.message) || e).slice(0, 100),
+        text: 'خطا. /start\n' + String((e && e.message) || e).slice(0, 100),
       });
     } catch (_e) {}
   }

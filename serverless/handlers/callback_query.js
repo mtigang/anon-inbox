@@ -1,13 +1,20 @@
 import { api } from 'sdk';
-import { isOwner } from 'lib/config';
+import { isOwner, WELCOME_USER } from 'lib/config';
 import {
   getUser,
   getMessage,
   markRead,
   formatUserCard,
   isBotOn,
+  uidOf,
 } from 'lib/dbutil';
-import { ownerKeyboard, sanitizeMarkup } from 'lib/keyboards';
+import {
+  ownerKeyboard,
+  userKeyboard,
+  userStartInline,
+  backKeyboard,
+  sanitizeMarkup,
+} from 'lib/keyboards';
 import { setState, clearState } from 'lib/state';
 
 async function answer(cq, text, alert) {
@@ -26,6 +33,27 @@ export default async function (cq) {
     const userId = Number(cq.from.id);
     const data = String(cq.data || '');
     const chatId = cq.message && cq.message.chat && cq.message.chat.id;
+
+    // کاربر عادی: شروع ارسال
+    if (data === 'user_send') {
+      if (isOwner(userId)) {
+        await answer(cq, 'مالک از منوی پایین استفاده کند');
+        return;
+      }
+      const on = await isBotOn();
+      if (!on) {
+        await answer(cq, 'ربات خاموش است', true);
+        return;
+      }
+      await setState(userId, 'compose');
+      await answer(cq, 'پیام را بنویسید');
+      await api.sendMessage({
+        chat_id: chatId,
+        text: 'پیام خود را بنویسید و بفرستید.\n(فقط متن)',
+        reply_markup: backKeyboard(),
+      });
+      return;
+    }
 
     if (!isOwner(userId)) {
       await answer(cq, 'فقط مالک', true);
@@ -51,7 +79,6 @@ export default async function (cq) {
       await api.sendMessage({
         chat_id: chatId,
         text: formatUserCard(u),
-        parse_mode: 'Markdown',
         reply_markup: ownerKeyboard(await isBotOn()),
       });
       return;
@@ -60,7 +87,7 @@ export default async function (cq) {
     if (data.startsWith('rd:')) {
       const mid = Number(data.slice(3));
       await markRead(mid);
-      await answer(cq, 'خوانده شد ✅');
+      await answer(cq, 'خوانده شد');
       return;
     }
 
@@ -71,17 +98,13 @@ export default async function (cq) {
         await answer(cq, 'پیام یافت نشد', true);
         return;
       }
-      await setState(userId, 'reply', { msgId: mid, peerId: Number(row.userId) });
+      const peerId = uidOf(row);
+      await setState(userId, 'reply', { msgId: mid, peerId: peerId });
       await answer(cq, 'پاسخ را بنویسید');
       await api.sendMessage({
         chat_id: chatId,
-        text:
-          'پاسخ برای پیام #' +
-          mid +
-          ' (کاربر `' +
-          row.userId +
-          '`) را بنویسید و بفرستید.\nبرای انصراف /start',
-        parse_mode: 'Markdown',
+        text: 'پاسخ برای پیام #' + mid + ' (کاربر ' + peerId + ') را بنویسید و بفرستید.',
+        reply_markup: backKeyboard(),
       });
       return;
     }
