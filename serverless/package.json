@@ -1,0 +1,19 @@
+{
+  "name": "anon-inbox",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ربات پیام ناشناس — ارسال مستقیم به مالک",
+  "type": "module",
+  "scripts": {
+    "deploy": "tgcloud push",
+    "status": "tgcloud status",
+    "migrate": "tgcloud migrate",
+    "login": "tgcloud login"
+  },
+  "devDependencies": {
+    "@tgcloud/cli": "latest"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
